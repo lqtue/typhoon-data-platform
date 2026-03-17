@@ -12,7 +12,6 @@ Source priority:
 """
 
 import logging
-import os
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -24,7 +23,7 @@ from .base import SupabaseWriter, CrawlLogger, CrawlConfig, retry_with_backoff, 
 log = logging.getLogger(__name__)
 
 RSS_URL = "https://www.metoc.navy.mil/jtwc/rss/jtwc.rss"
-STORM_TXT_URL = "https://www.metoc.navy.mil/jtwc/products/{prefix}{number}{year}.txt"
+STORM_TXT_URL = "https://www.metoc.navy.mil/jtwc/products/{prefix}{number}{year}.txt"  # year = 2-digit
 TIMEOUT = 20
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; VnExpress-Spotlight-DataBot/1.0)",
@@ -46,7 +45,7 @@ BASIN_CONFIG = {
 # RSS parser — discovers active storm IDs
 # ---------------------------------------------------------------------------
 
-def parse_rss(rss_text: str) -> list[dict]:
+def parse_rss(rss_text: str, now_utc: datetime) -> list[dict]:
     """
     Parse JTWC RSS feed → list of active storm dicts.
     Each dict: {storm_id, number, basin, name, label, text_url}
@@ -57,7 +56,7 @@ def parse_rss(rss_text: str) -> list[dict]:
         log.error("RSS parse error: %s", exc)
         return []
 
-    year = datetime.now(timezone.utc).year
+    year = str(now_utc.year)[-2:]  # JTWC URL uses 2-digit year (e.g. "25" for 2025)
     storms = []
     for item in root.findall(".//item"):
         title = item.findtext("title", "")
@@ -136,7 +135,7 @@ def parse_warning_text(text: str, now_utc: datetime) -> list[dict]:
         min_fc  = int(hhmm[2:]) if len(hhmm) == 4 else 0
 
         fc_month, fc_year = month, year
-        if day_fc < now_utc.day - 20:
+        if day_fc < now_utc.day and (now_utc.day - day_fc) > 20:
             fc_month = month % 12 + 1
             if fc_month == 1:
                 fc_year += 1
@@ -219,14 +218,10 @@ def _tau_to_iso(now_utc: datetime, tau_hours: int) -> str:
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
-def _fetch(url: str) -> str | None:
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-        r.raise_for_status()
-        return r.text
-    except requests.RequestException as exc:
-        log.warning("fetch failed %s: %s", url, exc)
-        return None
+def _fetch(url: str) -> str:
+    r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.text
 
 
 # ---------------------------------------------------------------------------
@@ -246,10 +241,7 @@ def run():
         now_utc = datetime.now(timezone.utc)
 
         rss_text = retry_with_backoff(lambda: _fetch(RSS_URL))
-        if not rss_text:
-            raise RuntimeError("JTWC RSS unreachable")
-
-        storms = parse_rss(rss_text)
+        storms = parse_rss(rss_text, now_utc)
         log.info("Active storms: %s", [s["storm_id"] for s in storms])
 
         # Archive storms no longer in RSS
@@ -278,12 +270,9 @@ def run():
             storm_pk = pk_row.data["id"]
 
             text = retry_with_backoff(lambda url=storm["text_url"]: _fetch(url))
-            if not text:
-                log.warning("No warning text for %s", storm["storm_id"])
-                continue
-
             positions = parse_warning_text(text, now_utc)
             if not positions:
+                log.warning("No positions parsed for %s", storm["storm_id"])
                 continue
 
             rows = positions_to_db_rows(positions, storm_pk, now_utc)

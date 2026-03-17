@@ -37,20 +37,24 @@ FORECAST VALID 19/0600Z 23.0N 132.0E
 
 
 def test_parse_rss_extracts_storms():
-    storms = parse_rss(SAMPLE_RSS)
+    now = datetime(2025, 9, 18, 0, 0, tzinfo=timezone.utc)
+    storms = parse_rss(SAMPLE_RSS, now)
     assert len(storms) == 2
     assert storms[0]["storm_id"] == "09W"
     assert storms[0]["name"] == "BEBINCA"
     assert storms[0]["basin"] == "W"
     assert "text_url" in storms[0]
+    assert "25" in storms[0]["text_url"]  # 2-digit year in URL
 
 
 def test_parse_rss_empty_returns_empty():
-    assert parse_rss("<rss><channel></channel></rss>") == []
+    now = datetime(2025, 9, 18, 0, 0, tzinfo=timezone.utc)
+    assert parse_rss("<rss><channel></channel></rss>", now) == []
 
 
 def test_parse_rss_malformed_returns_empty():
-    assert parse_rss("not xml at all") == []
+    now = datetime(2025, 9, 18, 0, 0, tzinfo=timezone.utc)
+    assert parse_rss("not xml at all", now) == []
 
 
 def test_parse_warning_text_extracts_current_position():
@@ -70,7 +74,7 @@ def test_parse_warning_text_extracts_forecast_positions():
     now = datetime(2024, 9, 18, 0, 0, tzinfo=timezone.utc)
     positions = parse_warning_text(SAMPLE_WARNING, now)
     forecasts = [p for p in positions if p["is_forecast"]]
-    assert len(forecasts) >= 2
+    assert len(forecasts) == 3
     assert forecasts[0]["forecast_hour"] == 6
     assert forecasts[0]["wind_kt"] == 95
 
