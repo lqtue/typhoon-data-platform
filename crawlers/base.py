@@ -59,14 +59,12 @@ class SupabaseWriter:
 
     def truncate_and_insert(self, table: str, records: list[dict]) -> int:
         """
-        Atomically truncate table then insert all records.
-        Uses a Supabase RPC function 'truncate_table' that must be created in
-        the database (see 004_rpc_functions.sql).
+        Truncate table then insert all records.
+        WARNING: not atomic — if the insert fails after truncation, the table will
+        be left empty until the next successful crawl cycle. Acceptable for
+        flood_warnings which is a current-state snapshot refreshed hourly.
 
-        Required SQL (run once in Supabase SQL editor):
-            CREATE OR REPLACE FUNCTION truncate_table(table_name TEXT)
-            RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $$
-            BEGIN EXECUTE 'TRUNCATE TABLE ' || quote_ident(table_name); END; $$;
+        Uses a Supabase RPC function 'truncate_table' created in 004_rpc_functions.sql.
         """
         self._client.rpc("truncate_table", {"table_name": table}).execute()
         if not records:
@@ -93,6 +91,8 @@ class CrawlLogger:
             })
             .execute()
         )
+        if not result.data:
+            raise RuntimeError(f"crawl_log insert returned no data for source '{self._source}'")
         return result.data[0]["id"]
 
     def finish(self, log_id: int, records_upserted: int, status: str,
@@ -122,7 +122,7 @@ class CrawlConfig:
             .single()
             .execute()
         )
-        return result.data[0] if isinstance(result.data, list) else result.data
+        return result.data
 
     def update_last_run(self):
         """Stamp last_run_at = now()."""

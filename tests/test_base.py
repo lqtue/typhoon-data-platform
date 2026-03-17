@@ -2,7 +2,7 @@
 import time
 from unittest.mock import MagicMock, patch, call
 import pytest
-from crawlers.base import SupabaseWriter, CrawlLogger, CrawlConfig, retry_with_backoff
+from crawlers.base import SupabaseWriter, CrawlLogger, CrawlConfig, retry_with_backoff, build_client_from_env
 
 
 # ---------------------------------------------------------------------------
@@ -18,7 +18,7 @@ def test_retry_succeeds_on_first_attempt():
 
 def test_retry_succeeds_on_third_attempt():
     fn = MagicMock(side_effect=[RuntimeError("fail"), RuntimeError("fail"), "ok"])
-    with patch("time.sleep"):  # don't actually sleep in tests
+    with patch("crawlers.base.time.sleep"):  # don't actually sleep in tests
         result = retry_with_backoff(fn, max_attempts=3, base_delay=0.01)
     assert result == "ok"
     assert fn.call_count == 3
@@ -26,7 +26,7 @@ def test_retry_succeeds_on_third_attempt():
 
 def test_retry_raises_after_max_attempts():
     fn = MagicMock(side_effect=RuntimeError("always fails"))
-    with patch("time.sleep"):
+    with patch("crawlers.base.time.sleep"):
         with pytest.raises(RuntimeError, match="always fails"):
             retry_with_backoff(fn, max_attempts=3, base_delay=0.01)
     assert fn.call_count == 3
@@ -110,7 +110,7 @@ def test_crawl_config_get_returns_row(mock_supabase_client):
         "is_alert_mode": False,
     }
     select_result = MagicMock()
-    select_result.data = [row]
+    select_result.data = row  # dict, not list — matches supabase-py .single() behavior
     mock_supabase_client.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value = select_result
 
     config = CrawlConfig(mock_supabase_client, "jtwc")
@@ -126,3 +126,15 @@ def test_crawl_config_update_last_run(mock_supabase_client):
     config = CrawlConfig(mock_supabase_client, "jtwc")
     config.update_last_run()
     mock_supabase_client.table.assert_called_with("crawl_config")
+
+
+# ---------------------------------------------------------------------------
+# build_client_from_env
+# ---------------------------------------------------------------------------
+
+def test_build_client_from_env_raises_on_missing_vars(monkeypatch):
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    with pytest.raises(KeyError):
+        from crawlers.base import build_client_from_env
+        build_client_from_env()
