@@ -5,7 +5,7 @@ CREATE INDEX IF NOT EXISTS idx_storm_positions_storm_recorded
 CREATE INDEX IF NOT EXISTS idx_storm_positions_location
   ON storm_positions USING GIST (location);
 CREATE INDEX IF NOT EXISTS idx_storm_positions_active
-  ON storm_positions (storm_id, is_forecast, forecast_hour)
+  ON storm_positions (storm_id, recorded_at)
   WHERE is_forecast = FALSE;
 
 CREATE INDEX IF NOT EXISTS idx_water_levels_station_time
@@ -15,6 +15,8 @@ CREATE INDEX IF NOT EXISTS idx_water_stations_location
 
 CREATE INDEX IF NOT EXISTS idx_lake_levels_lake_time
   ON lake_levels (lake_id, recorded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_lakes_location
+  ON lakes USING GIST (location);
 
 CREATE INDEX IF NOT EXISTS idx_flood_warnings_boundary
   ON flood_warnings USING GIST (boundary);

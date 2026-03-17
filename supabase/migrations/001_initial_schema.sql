@@ -10,8 +10,8 @@ CREATE TABLE IF NOT EXISTS storms (
   storm_id      TEXT UNIQUE NOT NULL,
   name          TEXT,
   basin         TEXT,
-  source        TEXT NOT NULL,
-  status        TEXT NOT NULL DEFAULT 'active',
+  source        TEXT NOT NULL,                   -- jtwc | jma | ibtracs
+  status        TEXT NOT NULL DEFAULT 'active',  -- active | archived
   first_seen_at TIMESTAMPTZ,
   last_seen_at  TIMESTAMPTZ
 );
@@ -27,9 +27,9 @@ CREATE TABLE IF NOT EXISTS storm_positions (
   location      GEOMETRY(Point, 4326) NOT NULL,
   wind_kt       INTEGER,
   pressure_hpa  INTEGER,
-  category      TEXT,
+  category      TEXT,                            -- TD | TS | STS | TY | STY
   is_forecast   BOOLEAN NOT NULL DEFAULT FALSE,
-  forecast_hour INTEGER,
+  forecast_hour INTEGER,                         -- NULL=best track, 12/24/48/72/96/120
   fetched_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (storm_id, recorded_at, is_forecast, forecast_hour)
 );
@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS water_levels (
   station_id   BIGINT NOT NULL REFERENCES water_stations(id) ON DELETE CASCADE,
   recorded_at  TIMESTAMPTZ NOT NULL,
   level_m      NUMERIC,
-  alert_status TEXT,
+  alert_status TEXT,                             -- normal | level1 | level2 | level3
   fetched_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (station_id, recorded_at)
 );
@@ -107,8 +107,8 @@ CREATE TABLE IF NOT EXISTS flood_warnings (
   ward_name    TEXT,
   district     TEXT,
   province     TEXT,
-  warning_type TEXT,
-  severity     TEXT,
+  warning_type TEXT,                             -- landslide | flash_flood | waterlogging
+  severity     TEXT,                             -- very_high | high | medium | low
   valid_from   TIMESTAMPTZ,
   valid_until  TIMESTAMPTZ,
   boundary     GEOMETRY(Geometry, 4326),
@@ -122,9 +122,11 @@ CREATE TABLE IF NOT EXISTS flood_warnings (
 CREATE TABLE IF NOT EXISTS rainfall_anomalies (
   id               BIGSERIAL PRIMARY KEY,
   location         GEOMETRY(Point, 4326) NOT NULL,
+  lat              NUMERIC(8,4) NOT NULL,
+  lon              NUMERIC(8,4) NOT NULL,
   date             DATE NOT NULL,
   precipitation_mm NUMERIC,
   anomaly_mm       NUMERIC,
   anomaly_pct      NUMERIC,
-  UNIQUE (location, date)
+  UNIQUE (lat, lon, date)
 );
