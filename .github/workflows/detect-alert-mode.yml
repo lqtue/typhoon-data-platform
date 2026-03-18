@@ -110,6 +110,10 @@ jobs:
           cfg_row = (client.table("crawl_config")
                      .select("*").eq("source_name", "jtwc").single().execute()).data
 
+          if cfg_row is None:
+              print("No crawl_config row for jtwc — seeds not applied yet, exiting")
+              exit(0)
+
           # ---- Handle ARMED timeout ----
           armed_at = cfg_row.get("alert_armed_at")
           expires_at = cfg_row.get("alert_armed_expires_at")

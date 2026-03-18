@@ -35,31 +35,41 @@ def feature_to_storm_row(feature: dict) -> dict | None:
     sid = props.get("SID")
     if not sid:
         return None
+    times = props.get("point_times") or []
     return {
         "storm_id":      sid,
-        "name":          props.get("NAME", "").upper() or None,
-        "basin":         props.get("BASIN", "WP"),
+        "name":          (props.get("NAME") or "").upper() or None,
+        "basin":         "WP",   # all historical Vietnam-adjacent storms are WP
         "source":        "ibtracs",
         "status":        "archived",
-        "first_seen_at": _iso(props.get("ISO_TIME")),
-        "last_seen_at":  _iso(props.get("ISO_TIME")),
+        "first_seen_at": _iso(times[0]) if times else None,
+        "last_seen_at":  _iso(times[-1]) if times else None,
     }
 
 
 def feature_to_position_rows(feature: dict, storm_pk: int) -> list[dict]:
-    """Convert a LineString feature to a list of storm_positions rows."""
+    """Convert a LineString feature to storm_positions rows, one per coordinate."""
     props = feature.get("properties", {})
-    geom  = feature.get("geometry", {})
-    coords = geom.get("coordinates", [])
+    coords = feature.get("geometry", {}).get("coordinates", [])
+    times = props.get("point_times") or []
+    winds = props.get("point_winds") or []
+    # Map lowercase IBTrACS category to uppercase DB category
+    raw_cat = (props.get("category") or "td").lower()
+    cat_map = {"td": "TD", "ts": "TS", "sts": "STS", "ty": "TY", "sty": "STY"}
+    category = cat_map.get(raw_cat, "TD")
+
     rows = []
-    for lon, lat in coords:
+    for i, (lon, lat) in enumerate(coords):
+        recorded_at = _iso(times[i]) if i < len(times) else None
+        if not recorded_at:
+            continue
         rows.append({
             "storm_id":      storm_pk,
-            "recorded_at":   _iso(props.get("ISO_TIME")) or "1900-01-01T00:00:00+00:00",
+            "recorded_at":   recorded_at,
             "location":      f"POINT({lon} {lat})",
-            "wind_kt":       props.get("USA_WIND"),
-            "pressure_hpa":  props.get("USA_PRES") or None,
-            "category":      props.get("category", "TD"),
+            "wind_kt":       winds[i] if i < len(winds) else None,
+            "pressure_hpa":  None,
+            "category":      category,
             "is_forecast":   False,
             "forecast_hour": None,
         })
@@ -71,9 +81,12 @@ def _iso(s: str | None) -> str | None:
         return None
     try:
         from dateutil import parser as dp
-        return dp.parse(s).replace(tzinfo=timezone.utc).isoformat()
+        dt = dp.parse(str(s))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.isoformat()
     except Exception:
-        return s
+        return str(s)
 
 
 def run(geojson_path: str):
