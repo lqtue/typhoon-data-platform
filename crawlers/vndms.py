@@ -55,11 +55,11 @@ def compute_alert_status(level: float | None,
                           a1: float | None, a2: float | None, a3: float | None) -> str:
     if level is None:
         return "normal"
-    if a3 and level >= a3:
+    if a3 is not None and level >= a3:
         return "level3"
-    if a2 and level >= a2:
+    if a2 is not None and level >= a2:
         return "level2"
-    if a1 and level >= a1:
+    if a1 is not None and level >= a1:
         return "level1"
     return "normal"
 

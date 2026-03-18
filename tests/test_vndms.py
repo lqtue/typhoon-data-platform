@@ -1,6 +1,5 @@
 """Tests for crawlers/vndms.py"""
 import pytest
-from unittest.mock import MagicMock
 from crawlers.vndms import parse_stations, parse_water_levels, compute_alert_status
 
 
@@ -60,3 +59,4 @@ def test_compute_alert_status():
     assert compute_alert_status(10.6, 9.5, 10.5, 11.5) == "level2"
     assert compute_alert_status(11.6, 9.5, 10.5, 11.5) == "level3"
     assert compute_alert_status(None, 9.5, 10.5, 11.5) == "normal"
+    assert compute_alert_status(10.0, None, None, None) == "normal"
