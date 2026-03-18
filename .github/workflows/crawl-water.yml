@@ -1,0 +1,44 @@
+# crawl-water.yml
+# Runs hourly. Fetches VNDMS river levels + Thuy Loi lake levels.
+
+name: Crawl Water Levels (VNDMS + Thuy Loi)
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run VNDMS crawler
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python -c "
+          import logging; logging.basicConfig(level=logging.INFO)
+          from crawlers.vndms import run; run()
+          "
+
+      - name: Run Thuy Loi crawler
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python -c "
+          import logging; logging.basicConfig(level=logging.INFO)
+          from crawlers.thuyloivietnam import run; run()
+          "

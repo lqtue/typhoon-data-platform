@@ -1,0 +1,75 @@
+# confirm-alert-mode.yml
+# Manual workflow_dispatch: human confirms alert mode escalation.
+# Sets is_alert_mode=true for jtwc and jma sources, records who confirmed,
+# and closes the open alert-mode-request GitHub issue.
+
+name: Confirm Alert Mode
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmed_by:
+        description: 'Your name/handle confirming the escalation'
+        required: true
+        type: string
+
+permissions:
+  issues: write
+
+jobs:
+  confirm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Activate alert mode and close issue
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          CONFIRMED_BY: ${{ inputs.confirmed_by }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          python - << 'EOF'
+          import os, requests
+          from supabase import create_client
+
+          client = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_ROLE_KEY'])
+          confirmed_by = os.environ['CONFIRMED_BY']
+
+          for src in ["jtwc", "jma"]:
+              client.table("crawl_config").update({
+                  "is_alert_mode": True,
+                  "alert_confirmed_by": confirmed_by,
+              }).eq("source_name", src).execute()
+
+          print(f"Alert mode ACTIVATED. Confirmed by: {confirmed_by}")
+          print("JTWC and JMA crawlers will now run every 30 minutes.")
+
+          # Close the open alert-mode-request issue so future storms can re-arm cleanly
+          headers = {"Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                     "Accept": "application/vnd.github+json"}
+          repo = os.environ["GH_REPO"]
+          issues = requests.get(
+              f"https://api.github.com/repos/{repo}/issues",
+              params={"labels": "alert-mode-request", "state": "open"},
+              headers=headers
+          ).json()
+          for issue in issues:
+              requests.patch(
+                  f"https://api.github.com/repos/{repo}/issues/{issue['number']}",
+                  headers=headers,
+                  json={"state": "closed",
+                        "state_reason": "completed"}
+              )
+              print(f"Closed issue #{issue['number']}: {issue['title']}")
+          EOF

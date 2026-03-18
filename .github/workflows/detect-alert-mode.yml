@@ -1,0 +1,160 @@
+# detect-alert-mode.yml
+# Triggered after crawl-typhoon completes. Checks if any active storm is within
+# the Vietnam watch zone (95–120E, 5–28N). If so, arms alert mode and opens a
+# GitHub issue for human confirmation. Handles ARMED timeout (48h auto-dismiss).
+
+name: Detect Alert Mode
+
+on:
+  workflow_run:
+    workflows: ["Crawl Typhoon (JTWC + JMA)"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check watch zone and manage alert state
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          python - << 'EOF'
+          import os, json, datetime, requests
+          from supabase import create_client
+
+          client = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_ROLE_KEY'])
+
+          # ---- Helper functions defined first (Python requires definition before call) ----
+
+          def _gh_headers():
+              return {"Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                      "Accept": "application/vnd.github+json"}
+
+          def _open_alert_issue(storms):
+              headers = _gh_headers()
+              repo = os.environ["GH_REPO"]
+              # Dedup: skip if an open alert-mode-request issue already exists
+              existing = requests.get(
+                  f"https://api.github.com/repos/{repo}/issues",
+                  params={"labels": "alert-mode-request", "state": "open"},
+                  headers=headers
+              ).json()
+              if existing:
+                  print("Alert issue already open — skipping")
+                  return
+              storm_list = "\n".join(
+                  f"- **{s['name']}** ({s['storm_id']}) wind {s.get('wind_kt','?')}kt"
+                  for s in storms
+              )
+              body = (f"## Storm(s) detected in watch zone\n\n{storm_list}\n\n"
+                      f"Run the **confirm-alert-mode** workflow to switch crawlers "
+                      f"to 30-minute intervals.\n\n"
+                      f"This issue will auto-close in 48h if not confirmed.")
+              requests.post(
+                  f"https://api.github.com/repos/{repo}/issues",
+                  headers=headers,
+                  json={"title": "Alert mode armed — storm in watch zone",
+                        "body": body,
+                        "labels": ["alert-mode-request"]}
+              )
+
+          def _close_alert_issue():
+              headers = _gh_headers()
+              repo = os.environ["GH_REPO"]
+              issues = requests.get(
+                  f"https://api.github.com/repos/{repo}/issues",
+                  params={"labels": "alert-mode-request", "state": "open"},
+                  headers=headers
+              ).json()
+              for issue in issues:
+                  requests.patch(
+                      f"https://api.github.com/repos/{repo}/issues/{issue['number']}",
+                      headers=headers,
+                      json={"state": "closed"}
+                  )
+
+          # ---- Main logic ----
+
+          now = datetime.datetime.now(datetime.timezone.utc)
+
+          # Watch zone: 95–120E, 5–28N (approx 1000km buffer around Vietnam)
+          WATCH_ZONE = {"lon_min": 95, "lon_max": 120, "lat_min": 5, "lat_max": 28}
+
+          # Find active storms in watch zone via PostGIS RPC
+          result = client.rpc("storms_in_watch_zone", {
+              "lon_min": WATCH_ZONE["lon_min"],
+              "lon_max": WATCH_ZONE["lon_max"],
+              "lat_min": WATCH_ZONE["lat_min"],
+              "lat_max": WATCH_ZONE["lat_max"],
+          }).execute()
+          storms_in_zone = result.data or []
+
+          cfg_row = (client.table("crawl_config")
+                     .select("*").eq("source_name", "jtwc").single().execute()).data
+
+          # ---- Handle ARMED timeout ----
+          armed_at = cfg_row.get("alert_armed_at")
+          expires_at = cfg_row.get("alert_armed_expires_at")
+          if armed_at and not cfg_row["is_alert_mode"] and expires_at:
+              exp = datetime.datetime.fromisoformat(expires_at)
+              if now > exp:
+                  print("ARMED state expired — auto-dismissing")
+                  for src in ["jtwc", "jma"]:
+                      client.table("crawl_config").update({
+                          "alert_armed_at": None,
+                          "alert_armed_expires_at": None,
+                      }).eq("source_name", src).execute()
+                  _close_alert_issue()
+                  exit(0)
+
+          # ---- Auto-disarm: ALERT → NORMAL ----
+          if cfg_row["is_alert_mode"] and not storms_in_zone:
+              # Check if last 6h crawl_log entries show no new storm positions
+              six_h_ago = (now - datetime.timedelta(hours=6)).isoformat()
+              recent = (client.table("crawl_log")
+                        .select("records_upserted")
+                        .eq("source_name", "jtwc")
+                        .gte("started_at", six_h_ago)
+                        .execute()).data
+              if all((r["records_upserted"] or 0) == 0 for r in recent):
+                  print("No storms for 6h — disarming alert mode")
+                  for src in ["jtwc", "jma"]:
+                      client.table("crawl_config").update({
+                          "is_alert_mode": False,
+                          "alert_armed_at": None,
+                          "alert_armed_expires_at": None,
+                          "alert_confirmed_by": None,
+                      }).eq("source_name", src).execute()
+                  exit(0)
+
+          # ---- Arm if storm in zone and not already armed ----
+          if storms_in_zone and not armed_at:
+              print(f"Storm(s) in watch zone: {[s['name'] for s in storms_in_zone]}")
+              expires = (now + datetime.timedelta(hours=48)).isoformat()
+              for src in ["jtwc", "jma"]:
+                  client.table("crawl_config").update({
+                      "alert_armed_at": now.isoformat(),
+                      "alert_armed_expires_at": expires,
+                  }).eq("source_name", src).execute()
+              _open_alert_issue(storms_in_zone)
+          else:
+              print("No action needed")
+          EOF

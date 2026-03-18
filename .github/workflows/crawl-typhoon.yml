@@ -1,0 +1,57 @@
+# crawl-typhoon.yml
+# Runs every 30 minutes. In normal mode (is_alert_mode=false), exits early at :30
+# to achieve effective hourly cadence. In alert mode, runs every 30 minutes.
+
+name: Crawl Typhoon (JTWC + JMA)
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run JTWC + JMA crawlers
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python - << 'EOF'
+          import os, datetime, logging
+          logging.basicConfig(level=logging.INFO)
+          from supabase import create_client
+
+          client = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_ROLE_KEY'])
+
+          # Early-exit logic: cron fires every 30min (*/30).
+          # In normal mode we want effective hourly cadence, so we skip the :30 run.
+          # Range 15–44 targets the :30 fire window with tolerance for GitHub scheduler
+          # jitter (jobs can fire a few minutes late). If jitter pushes the :00 run past
+          # minute 15, it will also be skipped — an acceptable trade-off vs complexity
+          # of a more robust approach. In alert mode both :00 and :30 runs execute.
+          minute = datetime.datetime.utcnow().minute
+          row = client.table('crawl_config').select('is_alert_mode').eq('source_name','jtwc').single().execute()
+          is_alert = row.data['is_alert_mode']
+          if not is_alert and 15 <= minute < 45:
+              print(f'Normal mode + minute={minute} in :30 window — skipping this run')
+              exit(0)
+
+          from crawlers.jtwc import run as jtwc_run
+          jtwc_run()
+
+          from crawlers.jma import run as jma_run
+          jma_run()
+          EOF
