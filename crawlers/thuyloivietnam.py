@@ -39,7 +39,7 @@ def parse_lakes(api_response: list) -> list[dict]:
             "lake_code":           lake["hoCode"],
             "name":                lake.get("hoName"),
             "province":            lake.get("provinceName"),
-            "location":            f"POINT({lon} {lat})" if lat and lon else None,
+            "location":            f"POINT({lon} {lat})" if lat is not None and lon is not None else None,
             "capacity_million_m3": lake.get("dungTich"),
         })
     return rows

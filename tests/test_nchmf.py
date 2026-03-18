@@ -1,4 +1,5 @@
 """Tests for crawlers/nchmf.py"""
+import json
 import pytest
 from crawlers.nchmf import parse_warnings
 
@@ -25,12 +26,6 @@ SAMPLE_WARNINGS_RESPONSE = {
     ]
 }
 
-WARNING_TYPE_MAP = {
-    "luquetsatlo": "landslide",
-    "ngaplut": "waterlogging",
-    "luquet": "flash_flood",
-}
-
 
 def test_parse_warnings_maps_fields():
     rows = parse_warnings(SAMPLE_WARNINGS_RESPONSE)
@@ -41,7 +36,8 @@ def test_parse_warnings_maps_fields():
     assert r["province"] == "Hà Nội"
     assert r["warning_type"] == "landslide"
     assert r["severity"] == "very_high"
-    assert "POLYGON" in r["boundary"] or r["boundary"] is not None
+    assert r["boundary"] is not None
+    assert json.loads(r["boundary"])["type"] == "Polygon"
 
 
 def test_parse_warnings_empty():
