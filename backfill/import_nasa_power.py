@@ -35,6 +35,8 @@ def feature_to_row(feature: dict) -> dict | None:
     lon, lat = coords[0], coords[1]
     return {
         "location":         f"POINT({lon} {lat})",
+        "lat":              lat,
+        "lon":              lon,
         "date":             props.get("date"),
         "precipitation_mm": props.get("precipitation_mm"),
         "anomaly_mm":       props.get("anomaly_mm"),
