@@ -1,19 +1,22 @@
 """
 vndms.py — VNDMS River Water Level Crawler
 
-Fetches river monitoring station metadata and hourly water level readings
+Fetches river monitoring station metadata and current water level readings
 from the Vietnam National Data Management System (VNDMS).
+
+The API returns a single GeoJSON FeatureCollection. Each feature's popupInfo
+HTML contains station code, name, river, province, and the current water level.
+This avoids 455+ individual per-station requests.
 
 Writes to: water_stations (upsert on station_code), water_levels (upsert on station_id+recorded_at)
 
-API endpoints:
-  GET  https://vndms.dmptc.gov.vn/water_level — station list with metadata
-  POST https://vndms.dmc.gov.vn/home/detailRain — time-series for a station
-       Body: {"stationCode": "HN001", "fromDate": "2024-09-18", "toDate": "2024-09-18"}
+API endpoint:
+  GET https://vndms.dmptc.gov.vn/water_level — GeoJSON FeatureCollection with all stations
 """
 
 import logging
-from datetime import datetime, timezone, timedelta
+import re
+from datetime import datetime, timezone
 
 import requests
 
@@ -22,33 +25,71 @@ from .base import SupabaseWriter, CrawlLogger, CrawlConfig, retry_with_backoff, 
 log = logging.getLogger(__name__)
 
 STATIONS_URL = "https://vndms.dmptc.gov.vn/water_level"
-LEVELS_URL   = "https://vndms.dmc.gov.vn/home/detailRain"
 TIMEOUT = 30
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; VnExpress-Spotlight-DataBot/1.0)",
-    "Content-Type": "application/json",
 }
 
+# Patterns for parsing the popup HTML
+_RE_ID    = re.compile(r"data-id='(\d+)'")
+_RE_NAME  = re.compile(r'Tên trạm: <b>([^<]+)</b>')
+_RE_RIVER = re.compile(r'Sông: <b>([^<]+)</b>')
+_RE_PROV  = re.compile(r'Địa điểm: <b>([^<]+)</b>')
+_RE_LEVEL = re.compile(r'Mực nước \(([0-9.]+)\(m\)')
 
-def parse_stations(api_response: list) -> list[dict]:
-    """Map VNDMS station API response → water_stations rows."""
-    rows = []
-    for s in api_response:
-        lat = s.get("lat")
-        lon = s.get("lon")
-        rows.append({
-            "station_code":    s["stationCode"],
-            "name":            s.get("stationName"),
-            "river":           s.get("riverName"),
-            "basin":           s.get("basinName"),
-            "province":        s.get("provinceName"),
-            "location":        f"POINT({lon} {lat})" if lat and lon else None,
-            "alert_level_1_m": s.get("alertLevel1"),
-            "alert_level_2_m": s.get("alertLevel2"),
-            "alert_level_3_m": s.get("alertLevel3"),
+
+def parse_features(geojson: dict, now_utc: datetime) -> tuple[list[dict], list[dict]]:
+    """
+    Parse GeoJSON FeatureCollection → (station_rows, pending_level_rows).
+
+    pending_level_rows use 'station_code' instead of 'station_id';
+    the caller replaces station_code with the DB primary key after upserting stations.
+    """
+    recorded_at = now_utc.isoformat()
+    station_rows: list[dict] = []
+    pending_levels: list[dict] = []
+
+    for feature in geojson.get("features", []):
+        props = feature.get("properties", {})
+        geom  = feature.get("geometry", {})
+        popup = props.get("popupInfo", "")
+
+        m_id = _RE_ID.search(popup)
+        if not m_id:
+            continue
+        station_code = m_id.group(1)
+
+        m_name  = _RE_NAME.search(popup)
+        m_river = _RE_RIVER.search(popup)
+        m_prov  = _RE_PROV.search(popup)
+        m_level = _RE_LEVEL.search(popup)
+
+        coords = geom.get("coordinates", [])
+        lon = coords[0] if len(coords) > 1 else None
+        lat = coords[1] if len(coords) > 1 else None
+
+        station_rows.append({
+            "station_code":    station_code,
+            "name":            m_name.group(1).strip() if m_name else props.get("label"),
+            "river":           m_river.group(1) if m_river else None,
+            "basin":           None,
+            "province":        m_prov.group(1) if m_prov else None,
+            "location":        f"POINT({lon} {lat})" if lat is not None and lon is not None else None,
+            "alert_level_1_m": None,
+            "alert_level_2_m": None,
+            "alert_level_3_m": None,
             "source":          "vndms",
         })
-    return rows
+
+        if m_level:
+            pending_levels.append({
+                "station_code": station_code,
+                "recorded_at":  recorded_at,
+                "level_m":      float(m_level.group(1)),
+                "alert_status": "normal",
+            })
+
+    return station_rows, pending_levels
 
 
 def compute_alert_status(level: float | None,
@@ -64,25 +105,8 @@ def compute_alert_status(level: float | None,
     return "normal"
 
 
-def parse_water_levels(api_response: dict, station_id: int,
-                        alert_1: float | None, alert_2: float | None,
-                        alert_3: float | None) -> list[dict]:
-    """Map VNDMS time-series API response → water_levels rows."""
-    data = api_response.get("data", [])
-    rows = []
-    for entry in data:
-        level = entry.get("value")
-        rows.append({
-            "station_id":   station_id,
-            "recorded_at":  entry["time"],
-            "level_m":      level,
-            "alert_status": compute_alert_status(level, alert_1, alert_2, alert_3),
-        })
-    return rows
-
-
 def run():
-    """Entry point: sync stations then fetch latest readings for each."""
+    """Entry point: parse GeoJSON snapshot → upsert stations + current levels."""
     client = build_client_from_env()
     writer = SupabaseWriter(client)
     logger = CrawlLogger(client, "vndms")
@@ -92,38 +116,36 @@ def run():
     total = 0
     try:
         now_utc = datetime.now(timezone.utc)
-        today   = now_utc.strftime("%Y-%m-%d")
-        yesterday = (now_utc - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        # Fetch + upsert station metadata
-        stations_raw = retry_with_backoff(lambda: _fetch_json_get(STATIONS_URL))
-        station_rows = parse_stations(stations_raw)
+        # Single request: GeoJSON with all 455 stations + current levels in popupInfo
+        geojson = retry_with_backoff(lambda: _fetch_json_get(STATIONS_URL))
+        station_rows, pending_levels = parse_features(geojson, now_utc)
+        log.info("Parsed %d stations, %d with current readings", len(station_rows), len(pending_levels))
+
+        # Upsert station metadata
         writer.upsert("water_stations", station_rows, on_conflict="station_code")
-        log.info("Synced %d stations", len(station_rows))
 
-        # Fetch stations with their PKs
-        db_stations = (client.table("water_stations")
-                       .select("id, station_code, alert_level_1_m, alert_level_2_m, alert_level_3_m")
-                       .execute()).data
+        # Fetch station PKs to build station_code → id map
+        db_stations = (
+            client.table("water_stations")
+            .select("id, station_code")
+            .execute()
+        ).data
+        code_to_id = {s["station_code"]: s["id"] for s in db_stations}
 
-        # Fetch water levels for each station (last 24h)
-        for station in db_stations:
-            code = station["station_code"]
-            try:
-                resp = retry_with_backoff(lambda c=code: _fetch_json_post(
-                    LEVELS_URL, {"stationCode": c, "fromDate": yesterday, "toDate": today}
-                ))
-                level_rows = parse_water_levels(
-                    resp, station["id"],
-                    station["alert_level_1_m"],
-                    station["alert_level_2_m"],
-                    station["alert_level_3_m"],
-                )
-                count = writer.upsert("water_levels", level_rows,
-                                       on_conflict="station_id,recorded_at")
-                total += count
-            except Exception as exc:
-                log.warning("Failed to fetch levels for %s: %s", code, exc)
+        # Build level rows with proper station_id FK
+        level_rows = []
+        for pl in pending_levels:
+            sid = code_to_id.get(pl["station_code"])
+            if sid is not None:
+                level_rows.append({
+                    "station_id":   sid,
+                    "recorded_at":  pl["recorded_at"],
+                    "level_m":      pl["level_m"],
+                    "alert_status": pl["alert_status"],
+                })
+
+        total = writer.upsert("water_levels", level_rows, on_conflict="station_id,recorded_at")
 
         config.update_last_run()
         logger.finish(log_id, total, "success")
@@ -134,16 +156,9 @@ def run():
         raise
 
 
-def _fetch_json_get(url: str) -> list:
+def _fetch_json_get(url: str) -> dict:
     """GET request returning parsed JSON, raises on HTTP error."""
     r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-    r.raise_for_status()
-    return r.json()
-
-
-def _fetch_json_post(url: str, body: dict) -> dict:
-    """POST request returning parsed JSON, raises on HTTP error."""
-    r = requests.post(url, json=body, headers=HEADERS, timeout=TIMEOUT)
     r.raise_for_status()
     return r.json()
 
