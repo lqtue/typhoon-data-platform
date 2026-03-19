@@ -120,6 +120,7 @@ def run():
         db_lakes = client.table("lakes").select("id, lake_code").execute().data
         lake_pk_map = {lake["lake_code"]: lake["id"] for lake in db_lakes}
 
+        seen_levels: set[tuple] = set()
         level_rows = []
         for rec in all_records:
             code = rec.get("LakeCode") or rec.get("hoCode")
@@ -128,7 +129,10 @@ def run():
                 continue
             row = parse_lake_level(rec, lake_pk)
             if row:
-                level_rows.append(row)
+                key = (row["lake_id"], row["recorded_at"])
+                if key not in seen_levels:
+                    seen_levels.add(key)
+                    level_rows.append(row)
 
         total = writer.upsert("lake_levels", level_rows, on_conflict="lake_id,recorded_at")
         config.update_last_run()
