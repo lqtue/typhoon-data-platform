@@ -21,15 +21,16 @@ from datetime import datetime, timezone
 import requests
 from requests.exceptions import RequestException
 
+SOGIO_DU_BAO = 6  # forecast hours, required by the API
+
 from .base import SupabaseWriter, CrawlLogger, CrawlConfig, retry_with_backoff, build_client_from_env
 
 log = logging.getLogger(__name__)
 
 WARNINGS_URL = "https://luquetsatlo.nchmf.gov.vn/LayerMapBox/getDSCanhbaoSLLQ"
-TIMEOUT = 30
+TIMEOUT = 45
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; VnExpress-Spotlight-DataBot/1.0)",
-    "Content-Type": "application/json",
 }
 
 WARNING_TYPE_MAP = {
@@ -46,41 +47,62 @@ SEVERITY_MAP = {
 }
 
 
-def parse_warnings(api_response: dict) -> list[dict]:
+def parse_warnings(api_response) -> list[dict]:
     """
-    Map NCHMF GeoJSON FeatureCollection → flood_warnings rows.
-    Boundary stored as GeoJSON string; PostGIS ingests via ST_GeomFromGeoJSON.
-    Accepts both Polygon and MultiPolygon (boundary column is GEOMETRY(Geometry)).
+    Map NCHMF response → flood_warnings rows.
+    Handles two response formats:
+      - GeoJSON FeatureCollection (dict with "features") — includes boundary geometry
+      - Flat list of commune records — no boundary geometry
     """
-    features = api_response.get("features", [])
     fetched_at = datetime.now(timezone.utc).isoformat()
     rows = []
-    for feat in features:
-        props = feat.get("properties", {})
-        geom = feat.get("geometry")
-        boundary_geojson = json.dumps(geom) if geom else None
 
-        loai = props.get("LOAI_CB", "")
-        cap  = props.get("CAP_CB", "")
+    if isinstance(api_response, dict):
+        # GeoJSON FeatureCollection
+        for feat in api_response.get("features", []):
+            props = feat.get("properties", {})
+            geom = feat.get("geometry")
+            loai = props.get("LOAI_CB", "")
+            cap  = props.get("CAP_CB", "")
+            rows.append({
+                "ward_code":    props.get("MA_XA"),
+                "ward_name":    props.get("TEN_XA"),
+                "district":     props.get("TEN_HUYEN"),
+                "province":     props.get("TEN_TINH"),
+                "warning_type": WARNING_TYPE_MAP.get(loai, loai),
+                "severity":     SEVERITY_MAP.get(cap, cap),
+                "valid_from":   props.get("TU_NGAY"),
+                "valid_until":  props.get("DEN_NGAY"),
+                "boundary":     json.dumps(geom) if geom else None,
+                "fetched_at":   fetched_at,
+            })
+    elif isinstance(api_response, list):
+        # Flat commune-level list
+        for rec in api_response:
+            rows.append({
+                "ward_code":    rec.get("commune_id_2cap"),
+                "ward_name":    rec.get("commune_name_2cap"),
+                "district":     None,
+                "province":     rec.get("provinceName_2cap"),
+                "warning_type": WARNING_TYPE_MAP.get(rec.get("nguycoluquet", ""), None),
+                "severity":     rec.get("nguycosatlo") or rec.get("nguycoluquet"),
+                "valid_from":   None,
+                "valid_until":  None,
+                "boundary":     None,
+                "fetched_at":   fetched_at,
+            })
 
-        rows.append({
-            "ward_code":    props.get("MA_XA"),
-            "ward_name":    props.get("TEN_XA"),
-            "district":     props.get("TEN_HUYEN"),
-            "province":     props.get("TEN_TINH"),
-            "warning_type": WARNING_TYPE_MAP.get(loai, loai),
-            "severity":     SEVERITY_MAP.get(cap, cap),
-            "valid_from":   props.get("TU_NGAY"),
-            "valid_until":  props.get("DEN_NGAY"),
-            "boundary":     boundary_geojson,
-            "fetched_at":   fetched_at,
-        })
     return rows
 
 
-def _fetch_json_post(url: str, body: dict) -> dict:
-    """POST request returning parsed JSON, raises on HTTP error."""
-    r = requests.post(url, json=body, headers=HEADERS, timeout=TIMEOUT)
+def _fetch(date_str: str) -> dict | list:
+    """POST form-encoded request, raises on HTTP error."""
+    r = requests.post(
+        WARNINGS_URL,
+        data={"sogiodubao": SOGIO_DU_BAO, "date": date_str},
+        headers=HEADERS,
+        timeout=TIMEOUT,
+    )
     r.raise_for_status()
     return r.json()
 
@@ -95,7 +117,9 @@ def run():
     log_id = logger.start()
     total = 0
     try:
-        raw = retry_with_backoff(lambda: _fetch_json_post(WARNINGS_URL, {}))
+        now_utc = datetime.now(timezone.utc)
+        date_str = now_utc.strftime("%Y-%m-%d %H:00:00")
+        raw = retry_with_backoff(lambda: _fetch(date_str))
         rows = parse_warnings(raw)
         total = writer.truncate_and_insert("flood_warnings", rows)
         log.info("NCHMF: replaced flood_warnings with %d rows", total)
