@@ -110,7 +110,10 @@ def run():
             all_records.extend(records)
             log.info("Fetched %d records for %s", len(records), date_str)
 
-        lake_rows = parse_lakes(all_records)
+        # Deduplicate by lake_code (two days of fetching yields duplicate metadata rows)
+        seen = set()
+        lake_rows = [r for r in parse_lakes(all_records)
+                     if r["lake_code"] not in seen and not seen.add(r["lake_code"])]
         writer.upsert("lakes", lake_rows, on_conflict="lake_code")
         log.info("Synced %d lakes", len(lake_rows))
 
