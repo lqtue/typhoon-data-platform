@@ -19,6 +19,7 @@ import logging
 from datetime import datetime, timezone
 
 import requests
+from requests.exceptions import RequestException
 
 from .base import SupabaseWriter, CrawlLogger, CrawlConfig, retry_with_backoff, build_client_from_env
 
@@ -102,6 +103,9 @@ def run():
         config.update_last_run()
         logger.finish(log_id, total, "success")
 
+    except RequestException as exc:
+        log.warning("NCHMF upstream unavailable (skipping): %s", exc)
+        logger.finish(log_id, total, "upstream_unavailable", str(exc))
     except Exception as exc:
         logger.finish(log_id, total, "error", str(exc))
         raise

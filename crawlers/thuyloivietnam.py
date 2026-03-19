@@ -16,6 +16,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 
 import requests
+from requests.exceptions import RequestException
 
 from .base import SupabaseWriter, CrawlLogger, CrawlConfig, retry_with_backoff, build_client_from_env
 
@@ -111,6 +112,9 @@ def run():
         logger.finish(log_id, total, "success")
         log.info("Thuy Loi crawl complete. %d rows upserted.", total)
 
+    except RequestException as exc:
+        log.warning("Thuy Loi upstream unavailable (skipping): %s", exc)
+        logger.finish(log_id, total, "upstream_unavailable", str(exc))
     except Exception as exc:
         logger.finish(log_id, total, "error", str(exc))
         raise
